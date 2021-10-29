@@ -453,6 +453,8 @@ static inline u32 resctrl_get_schema_default_ctrl(struct resctrl_schema *s)
 	return WARN_ON_ONCE(1);
 }
 
+struct rdtgroup *rdtgroup_find_by_closid(u32 closid);
+
 /* The number of closid supported by this resource regardless of CDP */
 u32 resctrl_arch_get_num_closid(struct rdt_resource *r);
 u32 resctrl_arch_system_num_rmid_idx(void);

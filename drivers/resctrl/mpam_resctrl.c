@@ -90,6 +90,16 @@ static int __mpam_monitors_free_running(u16 num_mbwu_mon)
 	return 0;
 }
 
+u32 resctrl_arch_mon_count(struct rdt_resource *r, enum resctrl_event_id evtid)
+{
+	struct mpam_resctrl_res *res;
+
+	res = container_of(r, struct mpam_resctrl_res, resctrl_res);
+
+	return (evtid == QOS_L3_OCCUP_EVENT_ID) ?
+		res->class->props.num_csu_mon : res->class->props.num_mbwu_mon;
+}
+
 /*
  * If l3_num_allocated_mbwu is forced below PARTID * PMG, then the counters
  * are not free running, and ABMC's user-interface must be used to assign them.
@@ -552,11 +562,6 @@ static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_c
 				return -ENOENT;
 			}
 		}
-	}
-
-	if (irqs_disabled()) {
-		/* Check if we can access this domain without an IPI */
-		return -EIO;
 	}
 
 	cfg = (struct mon_cfg) {
@@ -2203,6 +2208,20 @@ static void mpam_resctrl_teardown_mon(struct mpam_resctrl_mon *mon, struct mpam_
 
 	__free_mbwu_mon(class, mon->mbwu_idx_to_mon, num_mbwu_mon);
 	mon->mbwu_idx_to_mon = NULL;
+}
+
+struct rdt_domain_hdr *resctrl_arch_find_domain(struct list_head *domain_list, int id)
+{
+	struct rdt_domain_hdr *hdr;
+
+	lockdep_assert_cpus_held();
+
+	list_for_each_entry(hdr, domain_list, list) {
+		if (hdr->id == id)
+			return hdr;
+	}
+
+	return NULL;
 }
 
 /*

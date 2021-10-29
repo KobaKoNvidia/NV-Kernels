@@ -26,6 +26,7 @@
 #include <linux/sched/task.h>
 #include <linux/slab.h>
 #include <linux/user_namespace.h>
+#include <linux/platform_device.h>
 
 #include <uapi/linux/magic.h>
 
@@ -87,6 +88,8 @@ struct dentry *debugfs_resctrl;
 enum resctrl_event_id mba_mbps_default_event;
 
 static bool resctrl_debug;
+
+static struct platform_device *pmu_pdev;
 
 void rdt_last_cmd_clear(void)
 {
@@ -1989,6 +1992,20 @@ const char *rdtgroup_name_by_closid(u32 closid)
 	return NULL;
 }
 
+struct rdtgroup *rdtgroup_find_by_closid(u32 closid)
+{
+	struct rdtgroup *rdtgrp;
+
+	lockdep_assert_held(&rdtgroup_mutex);
+
+	list_for_each_entry(rdtgrp, &rdt_all_groups, rdtgroup_list) {
+		if (rdtgrp->closid == closid)
+			return rdtgrp;
+	}
+
+	return NULL;
+}
+
 /* rdtgroup information files for one cache resource. */
 static struct rftype res_common_files[] = {
 	{
@@ -2265,7 +2282,7 @@ static struct rftype res_common_files[] = {
 		.mode		= 0444,
 		.kf_ops		= &rdtgroup_kf_single_ops,
 		.seq_show	= rdtgroup_closid_show,
-		.fflags		= RFTYPE_CTRL_BASE | RFTYPE_DEBUG,
+		.fflags		= RFTYPE_CTRL_BASE,
 	},
 	{
 		.name		= "schema_format",
@@ -2274,7 +2291,6 @@ static struct rftype res_common_files[] = {
 		.seq_show	= resctrl_schema_format_show,
 		.fflags		= RFTYPE_CTRL_INFO,
 	},
-
 };
 
 static int rdtgroup_add_files(struct kernfs_node *kn, unsigned long fflags)
@@ -4788,6 +4804,8 @@ int resctrl_init(void)
 	 */
 	debugfs_resctrl = debugfs_create_dir("resctrl", NULL);
 
+	pmu_pdev = platform_device_register_simple("resctrl_pmu", 0, NULL, 0);
+
 	return 0;
 
 cleanup_mountpoint:
@@ -4837,6 +4855,9 @@ static bool resctrl_online_domains_exist(void)
  */
 void resctrl_exit(void)
 {
+	platform_device_put(pmu_pdev);
+	pmu_pdev = NULL;
+
 	cpus_read_lock();
 	WARN_ON_ONCE(resctrl_online_domains_exist());
 

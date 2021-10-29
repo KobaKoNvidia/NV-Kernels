@@ -1334,32 +1334,28 @@ static void __ris_msmon_read(void *arg)
 
 static int _msmon_read(struct mpam_component *comp, struct mon_read *arg)
 {
-	int err, any_err = 0;
+	int any_err = 0;
 	struct mpam_vmsc *vmsc;
 
 	guard(srcu)(&mpam_srcu);
 	list_for_each_entry_srcu(vmsc, &comp->vmsc, comp_list,
 				 srcu_read_lock_held(&mpam_srcu)) {
-		struct mpam_msc *msc = vmsc->msc;
 		struct mpam_msc_ris *ris;
 
 		list_for_each_entry_srcu(ris, &vmsc->ris, vmsc_list,
 					 srcu_read_lock_held(&mpam_srcu)) {
 			arg->ris = ris;
+			arg->err = 0;
 
-			err = smp_call_function_any(&msc->accessibility,
-						    __ris_msmon_read, arg,
-						    true);
-			if (!err && arg->err)
-				err = arg->err;
+			__ris_msmon_read(arg);
 
 			/*
 			 * Save one error to be returned to the caller, but
 			 * keep reading counters so that get reprogrammed. On
 			 * platforms with NRDY this lets us wait once.
 			 */
-			if (err)
-				any_err = err;
+			if (arg->err)
+				any_err = arg->err;
 		}
 	}
 
