@@ -1489,11 +1489,15 @@ static inline unsigned int arch_get_idle_state_flags(u32 arch_flags)
 #endif /* CONFIG_ACPI_PROCESSOR_IDLE */
 
 #ifdef CONFIG_ACPI_PPTT
+typedef int (*acpi_pptt_cpu_callback_t)(struct acpi_pptt_processor *, void *);
 int acpi_pptt_cpu_is_thread(unsigned int cpu);
 int find_acpi_cpu_topology(unsigned int cpu, int level);
 int find_acpi_cpu_topology_cluster(unsigned int cpu);
 int find_acpi_cpu_topology_package(unsigned int cpu);
 int find_acpi_cpu_topology_hetero_id(unsigned int cpu);
+int find_acpi_cpu_cache_topology(unsigned int cpu, int level);
+u32 acpi_pptt_count_containers(void);
+int acpi_pptt_for_each_container(acpi_pptt_cpu_callback_t callback, void *arg);
 #else
 static inline int acpi_pptt_cpu_is_thread(unsigned int cpu)
 {
@@ -1514,6 +1518,19 @@ static inline int find_acpi_cpu_topology_package(unsigned int cpu)
 static inline int find_acpi_cpu_topology_hetero_id(unsigned int cpu)
 {
 	return -EINVAL;
+}
+static inline int find_acpi_cpu_cache_topology(unsigned int cpu, int level)
+{
+       return -EINVAL;
+}
+static inline u32 acpi_pptt_count_containers(void)
+{
+       return 0;
+}
+static inline int
+acpi_pptt_for_each_container(acpi_pptt_cpu_callback_t *callback, void *arg)
+{
+       return -EINVAL;
 }
 #endif
 
