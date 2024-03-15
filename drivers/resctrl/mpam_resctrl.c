@@ -471,6 +471,34 @@ void resctrl_arch_mon_ctx_free(struct rdt_resource *r,
 	resctrl_arch_mon_ctx_free_no_wait(evtid, mon_idx);
 }
 
+static bool __resctrl_arch_mon_can_overflow(enum resctrl_event_id eventid)
+{
+	struct mpam_props *cprops;
+	struct mpam_class *class = mpam_resctrl_counters[eventid].class;
+
+	if (!class)
+		return false;
+
+	/* No need to worry about a 63 bit counter overflowing */
+	cprops = &class->props;
+	return !mpam_has_feature(mpam_feat_msmon_mbwu_63counter, cprops);
+}
+
+bool resctrl_arch_mon_can_overflow(void)
+{
+	struct mpam_resctrl_mon *mon;
+	enum resctrl_event_id eventid;
+
+	for_each_mpam_resctrl_mon(mon, eventid) {
+		if (eventid == QOS_L3_OCCUP_EVENT_ID)
+			continue;
+		if (__resctrl_arch_mon_can_overflow(eventid))
+			return true;
+	}
+
+	return false;
+}
+
 static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
 		      enum mpam_device_features mon_type,
 		      int mon_idx,
