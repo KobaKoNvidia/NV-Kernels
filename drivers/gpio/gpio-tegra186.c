@@ -815,6 +815,31 @@ error:
 		gpio->num_irq, gpio->num_banks);
 	return -EINVAL;
 }
+#include <asm/debug-monitors.h>
+#include <asm/traps.h>
+#include <asm/ptrace.h>
+#include <linux/hw_breakpoint.h>
+#include <linux/stacktrace.h>
+#define WATCHPOINT_ADDRESS 0x000002200894
+#define MAX_STACK_TRACE_DEPTH 64
+static void __iomem *mapped_addr;
+
+static void show_backtrace(void)
+{
+	unsigned long stacks[16];
+	unsigned int len;
+
+	len = stack_trace_save(stacks, 16, 2);
+	stack_trace_print(stacks, len, 24);
+}
+
+static void watchpoint_handler(struct perf_event *bp, struct perf_sample_data *data,
+                               struct pt_regs *regs)
+{
+    printk("test: Watchpoint triggered! Register at 0x%lx was accessed.\n", mapped_addr);
+    //dump_stack();
+    show_backtrace();
+}
 
 static int tegra186_gpio_probe(struct platform_device *pdev)
 {
@@ -824,6 +849,31 @@ static int tegra186_gpio_probe(struct platform_device *pdev)
 	struct device_node *np;
 	char **names;
 	int err;
+	struct perf_event **wp_event;
+	struct perf_event_attr attr;
+	int ret;
+	uint32_t reg_val;
+
+	mapped_addr = ioremap(0x000002200894, 4096);
+	reg_val = readl(mapped_addr);
+	printk("test: 0x000002200894=[0x%x]", reg_val);
+	reg_val = 0xfe;
+	writel(reg_val, mapped_addr);
+	reg_val = readl(mapped_addr);
+	printk("test: 0x000002200894=[0x%x]", reg_val);
+
+	hw_breakpoint_init(&attr);
+	attr.bp_addr = mapped_addr;
+	attr.bp_len = HW_BREAKPOINT_LEN_4;
+	attr.bp_type = HW_BREAKPOINT_W;  // Watch for writes. Use HW_BREAKPOINT_R for reads, or HW_BREAKPOINT_RW for both
+	wp_event = register_wide_hw_breakpoint(&attr, watchpoint_handler, NULL);
+	if (IS_ERR(wp_event)) {
+	        ret = PTR_ERR(wp_event);
+	        pr_err("test: Failed to register watchpoint: %d\n", ret);
+	        return ret;
+	}
+
+	pr_info("test: watchpoint set for address 0x%lx\n", mapped_addr);
 
 	gpio = devm_kzalloc(&pdev->dev, sizeof(*gpio), GFP_KERNEL);
 	if (!gpio)
@@ -877,6 +927,9 @@ static int tegra186_gpio_probe(struct platform_device *pdev)
 
 		gpio->irq[i] = err;
 	}
+
+       reg_val = readl(mapped_addr);
+       printk("test: 1 0x000002200894=[0x%x]", reg_val);
 
 	gpio->gpio.request = gpiochip_generic_request;
 	gpio->gpio.free = gpiochip_generic_free;
@@ -960,9 +1013,14 @@ static int tegra186_gpio_probe(struct platform_device *pdev)
 		irq->num_parents = gpio->num_irq;
 		irq->parents = gpio->irq;
 	}
+       reg_val = readl(mapped_addr);
+       printk("test: 2 0x000002200894=[0x%x]", reg_val);
 
 	if (gpio->soc->num_irqs_per_bank > 1)
 		tegra186_gpio_init_route_mapping(gpio);
+
+       reg_val = readl(mapped_addr);
+       printk("test: 3 0x000002200894=[0x%x]", reg_val);
 
 	np = of_find_matching_node(NULL, tegra186_pmc_of_match);
 	if (np) {
@@ -990,6 +1048,8 @@ static int tegra186_gpio_probe(struct platform_device *pdev)
 
 		offset += port->pins;
 	}
+       reg_val = readl(mapped_addr);
+       printk("test: end 0x000002200894=[0x%x]", reg_val);
 
 	return devm_gpiochip_add_data(&pdev->dev, &gpio->gpio, gpio);
 }
