@@ -333,6 +333,7 @@ struct mpam_config {
 	bool	reset_cpbm;
 	bool	reset_mbw_pbm;
 	bool	reset_mbw_max;
+	bool	reset_cmax;
 
 	struct mpam_garbage	garbage;
 };

@@ -1614,11 +1614,11 @@ static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 
 	if (mpam_has_feature(mpam_feat_cmax_cmax, rprops)) {
 		if (mpam_has_feature(mpam_feat_cmax_cmax, cfg)) {
-			u32 cmax_val = cfg->cmax;
-
+			if (!cfg->reset_cmax)
+				cmax = cfg->cmax;
 			if (cfg->cmax_softlim)
-				cmax_val |= MPAMCFG_CMAX_SOFTLIM;
-			mpam_write_partsel_reg(msc, CMAX, cmax_val);
+				cmax |= MPAMCFG_CMAX_SOFTLIM;
+			mpam_write_partsel_reg(msc, CMAX, cmax);
 		} else {
 			mpam_write_partsel_reg(msc, CMAX, cmax);
 		}
@@ -1729,6 +1729,7 @@ static void mpam_init_reset_cfg(struct mpam_config *reset_cfg)
 		.reset_cpbm = true,
 		.reset_mbw_pbm = true,
 		.reset_mbw_max = true,
+		.reset_cmax = true,
 	};
 	bitmap_fill(reset_cfg->features, MPAM_FEATURE_LAST);
 }
@@ -2660,7 +2661,10 @@ static void mpam_reset_component_cfg(struct mpam_component *comp)
 		if (cprops->mbw_pbm_bits)
 			comp->cfg[i].mbw_pbm = GENMASK(cprops->mbw_pbm_bits - 1, 0);
 		if (cprops->bwa_wd)
-			comp->cfg[i].mbw_max = GENMASK(15, 16 - cprops->bwa_wd);
+			comp->cfg[i].mbw_max = MPAMCFG_MBW_MAX_MAX;
+		if (cprops->cmax_wd)
+			comp->cfg[i].cmax = MPAMCFG_CMAX_CMAX;
+
 	}
 }
 
