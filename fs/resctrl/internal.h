@@ -261,6 +261,11 @@ struct rdtgroup {
 
 #define RFTYPE_RES_PERF_PKG		BIT(12)
 
+/* files that are specific to a type of control, e.g. percent_min */
+#define RFTYPE_SCHEMA_BITMAP		BIT(13)
+#define RFTYPE_SCHEMA_PERCENT		BIT(14)
+#define RFTYPE_SCHEMA_MBPS		BIT(15)
+
 #define RFTYPE_CTRL_INFO		(RFTYPE_INFO | RFTYPE_CTRL)
 
 #define RFTYPE_MON_INFO			(RFTYPE_INFO | RFTYPE_MON)
