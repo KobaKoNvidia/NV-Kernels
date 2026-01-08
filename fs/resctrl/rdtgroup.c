@@ -19,6 +19,7 @@
 #include <linux/iommu.h>
 #include <linux/sysfs.h>
 #include <linux/kernfs.h>
+#include <linux/once.h>
 #include <linux/resctrl.h>
 #include <linux/seq_buf.h>
 #include <linux/seq_file.h>
@@ -2725,6 +2726,8 @@ struct rdtgroup *rdtgroup_kn_lock_live(struct kernfs_node *kn)
 		return NULL;
 
 	rdtgroup_kn_get(rdtgrp, kn);
+
+	DO_ONCE_SLEEPABLE(resctrl_arch_pre_mount);
 
 	cpus_read_lock();
 	mutex_lock(&rdtgroup_mutex);
