@@ -3737,67 +3737,94 @@ static int arm_smmu_def_domain_type(struct device *dev)
 	return 0;
 }
 
-static int arm_smmu_group_set_mpam(struct device *dev, u16 partid,
+static int arm_smmu_group_set_mpam(struct iommu_group *group, u16 partid,
 				   u8 pmg)
 {
 	int i;
 	u32 sid;
+	unsigned long flags;
 	struct arm_smmu_ste *step;
+	struct iommu_domain *domain;
 	struct arm_smmu_device *smmu;
 	struct arm_smmu_master *master;
 	struct arm_smmu_cmdq_batch cmds;
+	struct arm_smmu_domain *smmu_domain;
 	struct arm_smmu_cmdq_ent cmd = {
 		.opcode	= CMDQ_OP_CFGI_STE,
 		.cfgi	= {
 			.leaf	= true,
 		},
 	};
+	struct arm_smmu_master_domain *master_domain;
 
-	master = dev_iommu_priv_get(dev);
-	if (!(master->smmu->features & ARM_SMMU_FEAT_MPAM))
+	domain = iommu_get_domain_for_group(group);
+	smmu_domain = to_smmu_domain(domain);
+	if (!(smmu_domain->smmu->features & ARM_SMMU_FEAT_MPAM))
 		return -EIO;
-	smmu = master->smmu;
+	smmu = smmu_domain->smmu;
 
 	arm_smmu_cmdq_batch_init(smmu, &cmds, &cmd);
 
-	for (i = 0; i < master->num_streams; i++) {
-		sid = master->streams[i].id;
-		step = arm_smmu_get_step_for_sid(smmu, sid);
+	spin_lock_irqsave(&smmu_domain->devices_lock, flags);
+	list_for_each_entry(master_domain, &smmu_domain->devices,
+			    devices_elm) {
+		master = master_domain->master;
 
-		/* These need locking if the VMSPtr is ever used */
-		step->data[4] = FIELD_PREP(STRTAB_STE_4_PARTID, partid);
-		step->data[5] = FIELD_PREP(STRTAB_STE_5_PMG, pmg);
+		for (i = 0; i < master->num_streams; i++) {
+			sid = master->streams[i].id;
+			step = arm_smmu_get_step_for_sid(smmu, sid);
 
-		cmd.cfgi.sid = sid;
-		arm_smmu_cmdq_batch_add(smmu, &cmds, &cmd);
+			/* These need locking if the VMSPtr is ever used */
+			step->data[4] = FIELD_PREP(STRTAB_STE_4_PARTID, partid);
+			step->data[5] = FIELD_PREP(STRTAB_STE_5_PMG, pmg);
+
+			cmd.cfgi.sid = sid;
+			arm_smmu_cmdq_batch_add(smmu, &cmds, &cmd);
+		}
+
+		master->partid = partid;
+		master->pmg = pmg;
 	}
-
-	master->partid = partid;
-	master->pmg = pmg;
+	spin_unlock_irqrestore(&smmu_domain->devices_lock, flags);
 
 	arm_smmu_cmdq_batch_submit(smmu, &cmds);
 
 	return 0;
 }
 
-static int arm_smmu_group_get_mpam(struct device *dev, u16 *partid,
+static int arm_smmu_group_get_mpam(struct iommu_group *group, u16 *partid,
 				   u8 *pmg)
 {
+	int err = -EINVAL;
+	unsigned long flags;
+	struct iommu_domain *domain;
 	struct arm_smmu_master *master;
+	struct arm_smmu_domain *smmu_domain;
+	struct arm_smmu_master_domain *master_domain;
 
-	master = dev_iommu_priv_get(dev);
-	if (!(master->smmu->features & ARM_SMMU_FEAT_MPAM))
+	domain = iommu_get_domain_for_group(group);
+	smmu_domain = to_smmu_domain(domain);
+	if (!(smmu_domain->smmu->features & ARM_SMMU_FEAT_MPAM))
 		return -EIO;
 
 	if (!partid && !pmg)
 		return 0;
 
-	if (partid)
-		*partid = master->partid;
-	if (pmg)
-		*pmg = master->pmg;
+	spin_lock_irqsave(&smmu_domain->devices_lock, flags);
+	list_for_each_entry(master_domain, &smmu_domain->devices,
+			    devices_elm) {
+		master = master_domain->master;
+		if (master) {
+			if (partid)
+				*partid = master->partid;
+			if (pmg)
+				*pmg = master->pmg;
+			err = 0;
+		}
+	}
+	spin_unlock_irqrestore(&smmu_domain->devices_lock, flags);
 
-	return 0;
+	return err;
 }
 
 static const struct iommu_ops arm_smmu_ops = {
