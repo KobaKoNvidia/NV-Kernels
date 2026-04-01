@@ -18,6 +18,7 @@
 #include <linux/cpu.h>
 #include <linux/kernfs.h>
 #include <linux/math.h>
+#include <linux/resctrl.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/tick.h>
@@ -85,6 +86,33 @@ static int parse_bw(struct rdt_parse_data *data, struct resctrl_schema *s,
 	cfg = &d->staged_config[s->conf_type];
 	cfg->new_ctrl = bw_val;
 	cfg->have_new_ctrl = true;
+
+	return 0;
+}
+
+static bool hlim_validate(char *buf, u32 *data)
+{
+	int ret = kstrtou32(buf, 10, data);
+
+	if (ret || (*data != 0 && *data != 1)) {
+		rdt_last_cmd_printf("Invalid MB_HLIM value %s (expect 0 or 1)\n", buf);
+		return false;
+	}
+	return true;
+}
+
+static int parse_mb_hlim(struct rdt_parse_data *data, struct resctrl_schema *s,
+			 struct rdt_ctrl_domain *d)
+{
+	struct resctrl_staged_config *cfg;
+	u32 v;
+
+	if (!hlim_validate(data->buf, &v))
+		return -EINVAL;
+
+	cfg = &d->staged_config[s->conf_type];
+	cfg->mbw_max_hardlim = v != 0;
+	cfg->have_mbw_max_hardlim = true;
 
 	return 0;
 }
@@ -223,6 +251,9 @@ static int parse_line(char *line, struct resctrl_schema *s,
 	case RESCTRL_SCHEMA__AMD_MBA:
 		parse_ctrlval = &parse_bw;
 		break;
+	case RESCTRL_SCHEMA_MB_HLIM:
+		parse_ctrlval = &parse_mb_hlim;
+		break;
 	}
 
 	if (WARN_ON_ONCE(!parse_ctrlval))
@@ -256,7 +287,12 @@ next:
 	list_for_each_entry(d, &r->ctrl_domains, hdr.list) {
 		if (d->hdr.id == dom_id) {
 			cfg = &d->staged_config[t];
-			if (cfg->have_new_ctrl) {
+			if (s->schema_fmt == RESCTRL_SCHEMA_MB_HLIM) {
+				if (cfg->have_mbw_max_hardlim) {
+					rdt_last_cmd_printf("Duplicate domain %d\n", d->hdr.id);
+					return -EINVAL;
+				}
+			} else if (cfg->have_new_ctrl) {
 				rdt_last_cmd_printf("Duplicate domain %d\n", d->hdr.id);
 				return -EINVAL;
 			}
@@ -354,9 +390,9 @@ ssize_t rdtgroup_schemata_write(struct kernfs_open_file *of,
 
 		/*
 		 * Writes to mba_sc resources update the software controller,
-		 * not the control MSR.
+		 * not the control MSR.  MB_HLIM still programs MPAM hardware.
 		 */
-		if (is_mba_sc(r))
+		if (is_mba_sc(r) && s->schema_fmt != RESCTRL_SCHEMA_MB_HLIM)
 			continue;
 
 		ret = resctrl_arch_update_domains(r, rdtgrp->closid);
@@ -395,7 +431,10 @@ static void show_doms(struct seq_file *s, struct resctrl_schema *schema, int clo
 		if (sep)
 			seq_puts(s, ";");
 
-		if (is_mba_sc(r))
+		if (schema->schema_fmt == RESCTRL_SCHEMA_MB_HLIM)
+			ctrl_val = resctrl_arch_get_mbw_max_hardlim(r, dom, closid,
+								    schema->conf_type);
+		else if (is_mba_sc(r))
 			ctrl_val = dom->mbps_val[closid];
 		else
 			ctrl_val = resctrl_arch_get_config(r, dom, closid,
@@ -758,4 +797,18 @@ checkresult:
 out:
 	rdtgroup_kn_unlock(of->kn);
 	return ret;
+}
+
+/*
+ * Weak default: Arm MPAM overrides when linked.
+ */
+u32 __weak resctrl_arch_get_mbw_max_hardlim(struct rdt_resource *r,
+					    struct rdt_ctrl_domain *d,
+					    u32 closid, enum resctrl_conf_type type)
+{
+	(void)r;
+	(void)d;
+	(void)closid;
+	(void)type;
+	return 0;
 }

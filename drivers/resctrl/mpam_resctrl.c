@@ -9,6 +9,7 @@
 #include <linux/cpumask.h>
 #include <linux/errno.h>
 #include <linux/iommu.h>
+#include <linux/kernel.h>
 #include <linux/limits.h>
 #include <linux/list.h>
 #include <linux/math.h>
@@ -16,6 +17,8 @@
 #include <linux/rculist.h>
 #include <linux/resctrl.h>
 #include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/topology.h>
 #include <linux/types.h>
 #include <linux/wait.h>
 
@@ -98,6 +101,8 @@ static bool mpam_resctrl_abmc_enabled(void)
 	return l3_num_allocated_mbwu < resctrl_arch_system_num_rmid_idx();
 }
 
+static struct mpam_component *find_component(struct mpam_class *victim, int cpu);
+
 bool resctrl_arch_alloc_capable(void)
 {
 	struct mpam_resctrl_res *res;
@@ -120,10 +125,6 @@ bool resctrl_arch_mon_capable(void)
 	return l3->mon_capable;
 }
 
-/*
- * Provide empty implementations for compilation. The feature are not
- * needed on MPAM platforms.
- */
 bool resctrl_arch_is_evt_configurable(enum resctrl_event_id evt)
 {
 	return false;
@@ -522,19 +523,25 @@ static bool __resctrl_arch_mon_can_overflow(enum resctrl_event_id eventid)
 
 bool resctrl_arch_mon_can_overflow(void)
 {
-	if (__resctrl_arch_mon_can_overflow(QOS_L3_MBM_LOCAL_EVENT_ID))
-		return true;
+	struct mpam_resctrl_mon *mon;
+	enum resctrl_event_id eventid;
 
-	return __resctrl_arch_mon_can_overflow(QOS_L3_MBM_TOTAL_EVENT_ID);
+	for_each_mpam_resctrl_mon(mon, eventid) {
+		if (eventid == QOS_L3_OCCUP_EVENT_ID)
+			continue;
+		if (__resctrl_arch_mon_can_overflow(eventid))
+			return true;
+	}
+
+	return false;
 }
 
-static int
-__read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
-	   enum mpam_device_features mon_type,
-	   int mon_idx,
-	   enum resctrl_conf_type cdp_type, u32 closid, u32 rmid, u64 *val)
+static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
+		      enum mpam_device_features mon_type,
+		      int mon_idx,
+		      enum resctrl_conf_type cdp_type, u32 closid, u32 rmid, u64 *val)
 {
-	struct mon_cfg cfg = { };
+	struct mon_cfg cfg;
 
 	if (!mpam_is_enabled())
 		return -EINVAL;
@@ -544,26 +551,22 @@ __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
 
 	if (mon_idx == USE_PRE_ALLOCATED) {
 		int mbwu_idx = resctrl_arch_rmid_idx_encode(closid, rmid);
+
 		mon_idx = mon->mbwu_idx_to_mon[mbwu_idx];
 		if (mon_idx == -1) {
 			if (mpam_resctrl_abmc_enabled()) {
 				/* Report Unassigned */
 				return -ENOENT;
 			}
-			/* Report Unavailable */
-			return -EINVAL;
 		}
 	}
 
-	cfg.mon = mon_idx;
-	cfg.match_pmg = true;
-	cfg.partid = closid;
-	cfg.pmg = rmid;
-
-	if (irqs_disabled()) {
-		/* Check if we can access this domain without an IPI */
-		return -EIO;
-	}
+	cfg = (struct mon_cfg) {
+		.mon = mon_idx,
+		.match_pmg = true,
+		.partid = closid,
+		.pmg = rmid,
+	};
 
 	return mpam_msmon_read(mon_comp, &cfg, mon_type, val);
 }
@@ -573,19 +576,21 @@ static int read_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_component
 			     int mon_idx, u32 closid, u32 rmid, u64 *val)
 {
 	if (cdp_enabled) {
-		u64 cdp_val = 0;
+		u64 code_val = 0, data_val = 0;
 		int err;
 
 		err = __read_mon(mon, mon_comp, mon_type, mon_idx,
-				 CDP_CODE, closid, rmid, &cdp_val);
+				 CDP_CODE, closid, rmid, &code_val);
 		if (err)
 			return err;
 
 		err = __read_mon(mon, mon_comp, mon_type, mon_idx,
-				 CDP_DATA, closid, rmid, &cdp_val);
-		if (!err)
-			*val += cdp_val;
-		return err;
+				 CDP_DATA, closid, rmid, &data_val);
+		if (err)
+			return err;
+
+		*val += code_val + data_val;
+		return 0;
 	}
 
 	return __read_mon(mon, mon_comp, mon_type, mon_idx,
@@ -649,7 +654,7 @@ int resctrl_arch_cntr_read(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 	mon_comp = l3_dom->mon_comp[eventid];
 
 	return read_mon_cdp_safe(mon, mon_comp, mpam_feat_msmon_mbwu, mon_idx,
-				 closid, rmid, val);
+				closid, rmid, val);
 }
 
 static void __reset_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
@@ -1291,17 +1296,18 @@ static void mpam_resctrl_pick_counters(void)
 {
 	struct mpam_class *class;
 	unsigned int cache_size;
-	bool has_csu, has_mbwu;
+	struct mpam_props *cprops;
 
 	lockdep_assert_cpus_held();
 
 	guard(srcu)(&mpam_srcu);
 	list_for_each_entry_srcu(class, &mpam_classes, classes_list,
 				 srcu_read_lock_held(&mpam_srcu)) {
-		struct mpam_props *cprops = &class->props;
+		cprops = &class->props;
 
-		if (class->level < 3) {
-			pr_debug("class %u is before L3", class->level);
+		/* The name of the resource is L3... */
+		if (class->type == MPAM_CLASS_CACHE && class->level != 3) {
+			pr_debug("class %u is a cache but not the L3", class->level);
 			continue;
 		}
 
@@ -1310,9 +1316,8 @@ static void mpam_resctrl_pick_counters(void)
 			continue;
 		}
 
-		has_csu = cache_has_usable_csu(class);
-		if (has_csu && topology_matches_l3(class)) {
-			pr_debug("class %u has usable CSU, and matches L3 topology", class->level);
+		if (cache_has_usable_csu(class)) {
+			pr_debug("class %u has usable CSU", class->level);
 
 			/* CSU counters only make sense on a cache. */
 			switch (class->type) {
@@ -1330,18 +1335,18 @@ static void mpam_resctrl_pick_counters(void)
 					update_rmid_limits(cache_size);
 
 				counter_update_class(QOS_L3_OCCUP_EVENT_ID, class);
-				return;
+				break;
 			default:
-				return;
+				break;
 			}
 		}
 
-		has_mbwu = class_has_usable_mbwu(class);
-		if (has_mbwu &&
+		if (class_has_usable_mbwu(class) &&
 		    ((class->type == MPAM_CLASS_MEMORY) ||
 		    (topology_matches_l3(class) &&
 		    traffic_matches_l3(class)))) {
-			pr_debug("class %u has usable MBWU, and matches L3 topology", class->level);
+			pr_debug("class %u has usable MBWU, and matches L3 topology and traffic\n",
+				 class->level);
 
 			/*
 			 * MBWU counters may be 'local' or 'total' depending on
@@ -1364,11 +1369,6 @@ static void mpam_resctrl_pick_counters(void)
 			}
 		}
 	}
-
-	/* Allocation of MBWU monitors assumes that the class is unique... */
-	if (mpam_resctrl_counters[QOS_L3_MBM_LOCAL_EVENT_ID].class)
-		WARN_ON_ONCE(mpam_resctrl_counters[QOS_L3_MBM_LOCAL_EVENT_ID].class ==
-			     mpam_resctrl_counters[QOS_L3_MBM_TOTAL_EVENT_ID].class);
 }
 
 static void __config_cntr(struct mpam_resctrl_mon *mon, u32 cntr_id,
@@ -1793,6 +1793,32 @@ int resctrl_arch_update_one(struct rdt_resource *r, struct rdt_ctrl_domain *d,
 	}
 }
 
+static int mpam_apply_mbw_max_hardlim(struct rdt_resource *r, struct rdt_ctrl_domain *dom,
+				      u32 closid, enum resctrl_conf_type t, bool hardlim)
+{
+	u32 partid;
+	struct mpam_config cfg;
+	struct mpam_resctrl_res *res;
+	struct mpam_resctrl_dom *m_dom;
+
+	lockdep_assert_cpus_held();
+
+	res = container_of(r, struct mpam_resctrl_res, resctrl_res);
+	m_dom = container_of(dom, struct mpam_resctrl_dom, resctrl_ctrl_dom);
+
+	partid = resctrl_get_config_index(closid, t);
+	if (!r->alloc_capable || partid >= resctrl_arch_get_num_closid(r) ||
+	    !m_dom->ctrl_comp || !m_dom->ctrl_comp->cfg)
+		return -EINVAL;
+
+	cfg = m_dom->ctrl_comp->cfg[partid];
+	if (!mpam_has_feature(mpam_feat_mbw_max, &cfg))
+		return -EINVAL;
+
+	cfg.mbw_max_hardlim = hardlim;
+	return mpam_apply_config(m_dom->ctrl_comp, (u16)partid, &cfg);
+}
+
 /* TODO: this is IPI heavy */
 int resctrl_arch_update_domains(struct rdt_resource *r, u32 closid)
 {
@@ -1815,6 +1841,16 @@ int resctrl_arch_update_domains(struct rdt_resource *r, u32 closid)
 
 			err = resctrl_arch_update_one(r, d, closid, t,
 						      cfg->new_ctrl);
+			if (err)
+				return err;
+		}
+		for (t = 0; t < CDP_NUM_TYPES; t++) {
+			cfg = &d->staged_config[t];
+			if (!cfg->have_mbw_max_hardlim)
+				continue;
+
+			err = mpam_apply_mbw_max_hardlim(r, d, closid, t,
+							 cfg->mbw_max_hardlim);
 			if (err)
 				return err;
 		}
@@ -2290,6 +2326,105 @@ static int __init __cacheinfo_ready(void)
 	return 0;
 }
 device_initcall_sync(__cacheinfo_ready);
+
+/*
+ * True if HARDLIM via MPAMCFG_MBW_MAX is meaningful for this MBA resource.
+ * Use class props and, if needed, any control domain's partition-0 cfg (props
+ * may omit mbw_max while hardware still exposes it on cfg).
+ */
+static bool mba_resctrl_supports_mb_hlim(struct mpam_resctrl_res *res)
+{
+	struct rdt_resource *r = &res->resctrl_res;
+	struct rdt_ctrl_domain *dom;
+
+	if (!res->class)
+		return false;
+
+	if (mpam_has_feature(mpam_feat_mbw_max, &res->class->props))
+		return true;
+
+	lockdep_assert_cpus_held();
+
+	list_for_each_entry(dom, &r->ctrl_domains, hdr.list) {
+		struct mpam_resctrl_dom *m_dom;
+
+		m_dom = container_of(dom, struct mpam_resctrl_dom, resctrl_ctrl_dom);
+		if (!m_dom->ctrl_comp || !m_dom->ctrl_comp->cfg)
+			continue;
+		if (mpam_has_feature(mpam_feat_mbw_max, &m_dom->ctrl_comp->cfg[0]))
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Extra schemata line MB_HLIM:<dom>=0|1 — MPAMCFG_MBW_MAX HARDLIM per MBA ctrl
+ * domain (same domain ids as MB:).  Requires the MBA resource (same as MB:).
+ * Caller: resctrl mount with cpus_read_lock and rdtgroup_mutex held.
+ */
+void resctrl_arch_register_extra_schemata(void)
+{
+	struct resctrl_schema *s;
+	struct rdt_resource *r;
+	struct mpam_resctrl_res *res;
+	u32 n;
+
+	r = resctrl_arch_get_resource(RDT_RESOURCE_MBA);
+	if (!r || !r->alloc_capable)
+		return;
+
+	res = container_of(r, struct mpam_resctrl_res, resctrl_res);
+	if (!mba_resctrl_supports_mb_hlim(res))
+		return;
+
+	s = kzalloc(sizeof(*s), GFP_KERNEL);
+	if (!s) {
+		pr_warn("resctrl: could not allocate MB_HLIM schema\n");
+		return;
+	}
+
+	strscpy(s->name, "MB_HLIM", sizeof(s->name));
+	s->res = r;
+	n = resctrl_arch_get_num_closid(r);
+	if (resctrl_arch_get_cdp_enabled(r->rid) && n >= 2)
+		n /= 2;
+	s->num_closid = max_t(u32, n, 1U);
+	s->conf_type = CDP_NONE;
+	s->schema_fmt = RESCTRL_SCHEMA_MB_HLIM;
+	s->fmt_str = "%d=%u";
+	s->membw = r->membw;
+
+	resctrl_schema_list_append(s);
+}
+
+/*
+ * MB_HLIM schemata read path: 0/1 per domain for current closid.
+ */
+u32 resctrl_arch_get_mbw_max_hardlim(struct rdt_resource *r, struct rdt_ctrl_domain *dom,
+				     u32 closid, enum resctrl_conf_type type)
+{
+	struct mpam_resctrl_dom *m_dom;
+	struct mpam_config *cfg;
+	u32 partid;
+
+	if (!mpam_is_enabled() || r->rid != RDT_RESOURCE_MBA)
+		return 0;
+
+	partid = resctrl_get_config_index(closid, type);
+	if (partid >= resctrl_arch_get_num_closid(r))
+		return 0;
+
+	m_dom = container_of(dom, struct mpam_resctrl_dom, resctrl_ctrl_dom);
+	if (!m_dom->ctrl_comp || !m_dom->ctrl_comp->cfg)
+		return 0;
+
+	cfg = &m_dom->ctrl_comp->cfg[partid];
+	if (!mpam_has_feature(mpam_feat_mbw_max, cfg))
+		return 0;
+
+	return cfg->mbw_max_hardlim ? 1 : 0;
+}
 
 #ifdef CONFIG_MPAM_KUNIT_TEST
 #include "test_mpam_resctrl.c"

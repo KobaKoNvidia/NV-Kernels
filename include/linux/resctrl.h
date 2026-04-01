@@ -119,10 +119,14 @@ struct pseudo_lock_region {
  * struct resctrl_staged_config - parsed configuration to be applied
  * @new_ctrl:		new ctrl value to be loaded
  * @have_new_ctrl:	whether the user provided new_ctrl is valid
+ * @mbw_max_hardlim:	MPAM MBW_MAX HARDLIM bit (schemata MB_HLIM line)
+ * @have_mbw_max_hardlim: true if @mbw_max_hardlim was set for this staging pass
  */
 struct resctrl_staged_config {
 	u32			new_ctrl;
 	bool			have_new_ctrl;
+	bool			mbw_max_hardlim;
+	bool			have_mbw_max_hardlim;
 };
 
 enum resctrl_domain_type {
@@ -286,12 +290,14 @@ enum resctrl_scope {
  * @RESCTRL_SCHEMA_PERCENT:	The schema is a percentage.
  * @RESCTRL_SCHEMA_MBPS:	The schema ia a MBps value.
  * @RESCTRL_SCHEMA__AMD_MBA:	The schema value is MBA for AMD platforms.
+ * @RESCTRL_SCHEMA_MB_HLIM:	Per-domain MBW max hard limit (0/1), Arm MPAM only.
  */
 enum resctrl_schema_fmt {
 	RESCTRL_SCHEMA_BITMAP,
 	RESCTRL_SCHEMA_PERCENT,
 	RESCTRL_SCHEMA_MBPS,
 	RESCTRL_SCHEMA__AMD_MBA,
+	RESCTRL_SCHEMA_MB_HLIM,
 };
 
 /**
@@ -426,6 +432,8 @@ static inline u32 resctrl_get_resource_default_ctrl(struct rdt_resource *r)
 	case RESCTRL_SCHEMA_MBPS:
 	case RESCTRL_SCHEMA__AMD_MBA:
 		return r->membw.max_bw;
+	case RESCTRL_SCHEMA_MB_HLIM:
+		return 0;
 	}
 
 	return WARN_ON_ONCE(1);
@@ -445,6 +453,8 @@ static inline u32 resctrl_get_schema_default_ctrl(struct resctrl_schema *s)
 	case RESCTRL_SCHEMA_MBPS:
 	case RESCTRL_SCHEMA__AMD_MBA:
 		return s->membw.max_bw;
+	case RESCTRL_SCHEMA_MB_HLIM:
+		return 0;
 	}
 
 	return WARN_ON_ONCE(1);
@@ -552,6 +562,18 @@ int resctrl_arch_update_one(struct rdt_resource *r, struct rdt_ctrl_domain *d,
 
 u32 resctrl_arch_get_config(struct rdt_resource *r, struct rdt_ctrl_domain *d,
 			    u32 closid, enum resctrl_conf_type type);
+
+/**
+ * resctrl_arch_get_mbw_max_hardlim() - MB_HLIM schemata value (0 or 1) per domain.
+ *
+ * Called with cpus_read_lock() held.
+ */
+u32 resctrl_arch_get_mbw_max_hardlim(struct rdt_resource *r, struct rdt_ctrl_domain *d,
+				     u32 closid, enum resctrl_conf_type type);
+
+void resctrl_arch_register_extra_schemata(void);
+void resctrl_schema_list_append(struct resctrl_schema *s);
+
 int resctrl_online_ctrl_domain(struct rdt_resource *r, struct rdt_ctrl_domain *d);
 int resctrl_online_mon_domain(struct rdt_resource *r, struct rdt_domain_hdr *hdr);
 void resctrl_offline_ctrl_domain(struct rdt_resource *r, struct rdt_ctrl_domain *d);

@@ -846,9 +846,13 @@ static ssize_t rdtgroup_tasks_write(struct kernfs_open_file *of,
 		pid_str = strim(strsep(&buf, ","));
 
 		is_iommu = string_is_iommu_group(pid_str, &iommu_group_id);
-		if (is_iommu)
+		if (is_iommu) {
 			ret = rdtgroup_move_iommu(iommu_group_id, rdtgrp, of);
-		else if (kstrtoint(pid_str, 0, &pid)) {
+			if (ret)
+				break;
+			continue;
+		}
+		if (kstrtoint(pid_str, 0, &pid)) {
 			rdt_last_cmd_printf("Task list parsing error pid %s\n", pid_str);
 			ret = -EINVAL;
 			break;
@@ -1782,6 +1786,9 @@ static int resctrl_schema_format_show(struct kernfs_open_file *of,
 	case RESCTRL_SCHEMA__AMD_MBA:
 		seq_puts(seq, "platform\n");
 		break;
+	case RESCTRL_SCHEMA_MB_HLIM:
+		seq_puts(seq, "mb_hlim\n");
+		break;
 	}
 
 	return 0;
@@ -2507,6 +2514,15 @@ static u32 fflags_from_schema(struct resctrl_schema *s)
 	struct rdt_resource *r = s->res;
 	u32 fflags = 0;
 
+	/*
+	 * MB_HLIM shares the MBA rdt_resource but is not an MBA bandwidth
+	 * percentage schema: omit RFTYPE_RES_MB info files (min_bandwidth,
+	 * bandwidth_gran, delay_linear).  Only RFTYPE_CTRL_INFO from the caller
+	 * applies (num_closids, schema_format).
+	 */
+	if (s->schema_fmt == RESCTRL_SCHEMA_MB_HLIM)
+		return 0;
+
 	/* Some resources are configured purely from their rid */
 	fflags |= fflags_from_resource(r);
 	if (fflags)
@@ -2524,6 +2540,9 @@ static u32 fflags_from_schema(struct resctrl_schema *s)
 		break;
 	case RESCTRL_SCHEMA__AMD_MBA:
 		/* No standard files are exposed */
+		break;
+	case RESCTRL_SCHEMA_MB_HLIM:
+		/* Returned 0 before switch; satisfies -Wswitch */
 		break;
 	}
 
@@ -2876,6 +2895,7 @@ static int schemata_list_add(struct rdt_resource *r, enum resctrl_conf_type type
 	case RESCTRL_SCHEMA_PERCENT:
 	case RESCTRL_SCHEMA_MBPS:
 	case RESCTRL_SCHEMA__AMD_MBA:
+	case RESCTRL_SCHEMA_MB_HLIM:
 		s->fmt_str = "%d=%u";
 		break;
 	}
@@ -2922,6 +2942,21 @@ static void schemata_list_destroy(void)
 		list_del(&s->list);
 		kfree(s);
 	}
+}
+
+void resctrl_schema_list_append(struct resctrl_schema *s)
+{
+	unsigned int cl = strlen(s->name);
+
+	lockdep_assert_held(&rdtgroup_mutex);
+	if (cl > max_name_width)
+		max_name_width = cl;
+	INIT_LIST_HEAD(&s->list);
+	list_add_tail(&s->list, &resctrl_schema_all);
+}
+
+void __weak resctrl_arch_register_extra_schemata(void)
+{
 }
 
 static void hack_file_mode(const char *name, u16 mode)
@@ -3000,6 +3035,7 @@ static int rdt_get_tree(struct fs_context *fc)
 		schemata_list_destroy();
 		goto out_ctx;
 	}
+	resctrl_arch_register_extra_schemata();
 
 	ret = closid_init();
 	if (ret)

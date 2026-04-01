@@ -362,6 +362,8 @@ struct mpam_config {
 	u16	cmin;
 
 	bool	cmax_softlim;
+	/* MPAMCFG_MBW_MAX HARDLIM (bit 31), Arm MPAM IHI0099 */
+	bool	mbw_max_hardlim;
 
 	struct mpam_garbage	garbage;
 };
