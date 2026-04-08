@@ -1,0 +1,48 @@
+---
+description: "NVBug 6057998 — [DGX Spark][CX7] NCCL BW degradation with QSFP hotplug on OTA2.1"
+alwaysApply: true
+---
+
+# NVBug 6057998 — NCCL BW Degradation After QSFP Hotplug
+
+## Bug Summary
+
+**Synopsis:** [DGX Spark][CX7] NCCL BW drops from ~23 GB/s → ~3 GB/s after QSFP cable hotplug. Recovers only after full reboot of both B2B nodes.
+
+**Filed:** 2026-04-07 | **Status:** Dev - Open - To fix | **Tags:** `DGX_Spark_Blocker`, `DGX_Spark_OTA2604`
+**Assignee:** Surabhi Chythanya Kumar (schythanyaku) | **JIRA:** [DGX-16070](https://jirasw.nvidia.com/browse/DGX-16070)
+**Root cause hypothesis:** Hotplug driver introduced in OTA2 leaves RoCE QPs in a stale/error state after link re-up.
+
+## Key Findings
+
+- `mlx5_ib_poll_cq` kprobe gets near-zero hits — ibverbs userspace polling bypasses the kernel via direct mmap ring read. Trace `mlx5e_handle_rx_cqe` and `mlx5e_poll_tx_cq` instead.
+- MTU must be ≥ 4096 (ideally 9000) on the RDMA netdev for RoCE NCCL traffic.
+- After hotplug, suspect: link re-negotiates but `mlx5_ib_modify_qp` is not called to reset QPs → QPs stay in degraded state.
+- Kernel functions worth tracing: `mlx5_port_module_event`, `mlx5e_link_up`, `mlx5_cmd_exec`, `mlx5_ib_modify_qp`.
+
+## Diagnostic Tool
+
+```bash
+# Located at:
+tools/nccl_bw_diag.sh
+
+# Copy to target and run:
+scp tools/nccl_bw_diag.sh <user>@<target>:/tmp/
+sudo bash /tmp/nccl_bw_diag.sh --hotplug    # auto-generates traffic + traces hotplug event
+sudo bash /tmp/nccl_bw_diag.sh --selftest   # ib_send_bw loopback baseline
+sudo bash /tmp/nccl_bw_diag.sh --watch      # continuous counter polling
+sudo bash /tmp/nccl_bw_diag.sh --pid <PID>  # attach to running NCCL process
+```
+
+## Stack
+
+```
+NCCL allreduce → NCCL NET plugin → ibverbs (libibverbs) → mlx5 driver → CX7 NIC → QSFP → wire
+```
+
+## Open Questions (as of 2026-04-08)
+
+1. Does `mlx5_ib_modify_qp` fire after hotplug link-up? If not — QPs are never reset.
+2. Is the GID table repopulated after link-up? (`show_gids` / `/sys/class/infiniband/mlx5_*/ports/*/gids/`)
+3. Does `ip link set <netdev> down && up` (without reboot) recover BW? → Minimal fix candidate.
+4. Reproducible on OTA2604? (Sophie Yang / Raymond Lien to confirm)
