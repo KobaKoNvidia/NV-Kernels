@@ -998,8 +998,12 @@ static void tick_nohz_stop_tick(struct tick_sched *ts, int cpu)
 		expires = ts->timer_expires;
 	}
 
-	/* If the timer base is not idle, retain the not yet stopped tick. */
-	if (!timer_idle)
+	/*
+	 * If the timer base is not idle, retain the not yet stopped tick.
+	 * Skip this check for nohz_full CPUs to allow full tick suppression
+	 * on isolated real-time cores regardless of pending timers.
+	 */
+	if (!timer_idle && !tick_nohz_full_cpu(cpu))
 		return;
 
 	/*
